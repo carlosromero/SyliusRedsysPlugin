@@ -9,13 +9,18 @@ use Payum\Core\ApiAwareInterface;
 use Payum\Core\ApiAwareTrait;
 use Payum\Core\Bridge\Spl\ArrayObject;
 use Payum\Core\Exception\RequestNotSupportedException;
+use Payum\Core\GatewayAwareInterface;
+use Payum\Core\GatewayAwareTrait;
 use Payum\Core\Reply\HttpPostRedirect;
+use Payum\Core\Reply\HttpResponse;
 use Payum\Core\Request\Capture;
+use Payum\Core\Request\GetHttpRequest;
 use Payum\Core\Security\GenericTokenFactoryAwareInterface;
 use Payum\Core\Security\GenericTokenFactoryAwareTrait;
 
-class CaptureAction implements ActionInterface, ApiAwareInterface, GenericTokenFactoryAwareInterface
-{
+class CaptureAction implements ActionInterface, ApiAwareInterface, GenericTokenFactoryAwareInterface, GatewayAwareInterface
+{    
+    use GatewayAwareTrait;
     use ApiAwareTrait;
     use GenericTokenFactoryAwareTrait;
 
@@ -34,6 +39,36 @@ class CaptureAction implements ActionInterface, ApiAwareInterface, GenericTokenF
 
         $postData = ArrayObject::ensureArrayObject($request->getModel());
 
+        //If the notification is late for some reason, the details are not update and it starts an infinite loop between
+        //redsys and capture-url with error ds_order number repeated error.
+        // So we check here if this is the capture-url called from redsys with payment info
+        // to update details and redirect to afterpay-url
+        $this->gateway->execute($httpRequest = new GetHttpRequest());
+
+        if (array_key_exists('Ds_Signature', $httpRequest->query) && (null !== $httpRequest->query['Ds_Signature'])) {
+            if (!array_key_exists('Ds_MerchantParameters', $httpRequest->query) || (null === $httpRequest->query['Ds_MerchantParameters'])) {
+                throw new HttpResponse('The notification is invalid', 400);
+            }
+
+            if (false == $this->api->validateNotificationSignature($httpRequest->query)) {
+                throw new HttpResponse('The notification is invalid', 400);
+            }
+
+            // After migrating to sha256, DS_Response param is not present in the
+            // post request sent by the bank. Instead, bank sends an encoded string
+            //  our gateway needs to decode.
+            // Once this is decoded we need to add this info to the details among
+            // with the $httpRequest->request part
+
+            $postData->replace(
+                ArrayObject::ensureArrayObject(
+                    json_decode(base64_decode(strtr($httpRequest->query['Ds_MerchantParameters'], '-_', '+/')))
+                )->toUnsafeArray() +
+                $httpRequest->query
+            );
+
+          }
+    
         if (empty($postData['Ds_Merchant_MerchantURL']) && $request->getToken() && $this->tokenFactory) {
             $notifyToken = $this->tokenFactory->createNotifyToken(
                 $request->getToken()->getGatewayName(),
