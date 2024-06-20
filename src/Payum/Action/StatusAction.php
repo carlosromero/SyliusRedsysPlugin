@@ -39,7 +39,7 @@ class StatusAction implements ActionInterface
             return;
         }
 
-        $request->markUnknown();
+        $request->markFailed();
     }
 
     /**
